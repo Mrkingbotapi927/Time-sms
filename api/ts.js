@@ -11,7 +11,7 @@ const CREDENTIALS = {
 const BASE_URL = "https://www.timesms.org";
 
 const COMMON_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 15; RMX3930 Build/AP3A.240905.015.A2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.120 Mobile Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Mobile Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9"
 };
@@ -23,52 +23,68 @@ const STATE = {
     lastLoginTime: 0
 };
 
-// ====================== LOGIN FUNCTION ======================
+// ====================== LOGIN ======================
 async function loginAndGetSession() {
-    console.log("🔐 Logging in...");
+    console.log("🔐 Login start...");
 
-    try {
-        const response = await axios.post(
-            `${BASE_URL}/login`,
-            new URLSearchParams({
-                username: CREDENTIALS.username,
-                password: CREDENTIALS.password
-            }),
-            {
-                headers: {
-                    ...COMMON_HEADERS,
-                    "Content-Type": "application/x-www-form-urlencoded"
-                },
-                maxRedirects: 0,
-                validateStatus: status => status < 500
-            }
-        );
-
-        // ✅ Extract cookie
-        const cookies = response.headers['set-cookie'];
-        if (!cookies) throw new Error("No cookie received");
-
-        STATE.cookie = cookies.map(c => c.split(';')[0]).join('; ');
-
-        // ✅ Get sesskey from dashboard page
-        const dashboard = await axios.get(`${BASE_URL}/agent/MySMSNumbers`, {
+    // STEP 1: Login
+    const loginRes = await axios.post(
+        `${BASE_URL}/login`,
+        new URLSearchParams({
+            username: CREDENTIALS.username,
+            password: CREDENTIALS.password
+        }),
+        {
             headers: {
                 ...COMMON_HEADERS,
-                "Cookie": STATE.cookie
-            }
-        });
+                "Content-Type": "application/x-www-form-urlencoded"
+            },
+            maxRedirects: 0,
+            validateStatus: s => s < 500
+        }
+    );
 
-        const match = dashboard.data.match(/sesskey=([A-Za-z0-9=]+)/);
-        if (!match) throw new Error("sesskey not found");
+    // Extract cookie
+    const cookies = loginRes.headers['set-cookie'];
+    if (!cookies) throw new Error("Login failed (no cookie)");
 
-        STATE.sessKey = match[1];
-        STATE.lastLoginTime = Date.now();
+    STATE.cookie = cookies.map(c => c.split(';')[0]).join('; ');
 
-        console.log("✅ Login success");
-    } catch (err) {
-        console.error("❌ Login failed:", err.message);
-        throw err;
+    // STEP 2: Open dashboard
+    const dash = await axios.get(`${BASE_URL}/agent/MySMSNumbers`, {
+        headers: {
+            ...COMMON_HEADERS,
+            "Cookie": STATE.cookie
+        }
+    });
+
+    const html = dash.data;
+
+    // STEP 3: Extract sesskey (multi method)
+    let sessKey = null;
+
+    let match = html.match(/sesskey=([A-Za-z0-9=]+)/);
+    if (match) sessKey = match[1];
+
+    if (!sessKey) {
+        match = html.match(/name="sesskey"\s+value="([^"]+)"/);
+        if (match) sessKey = match[1];
     }
+
+    if (!sessKey) {
+        match = html.match(/sesskey["']?\s*[:=]\s*["']([^"']+)["']/);
+        if (match) sessKey = match[1];
+    }
+
+    if (!sessKey) {
+        console.log("❌ HTML preview:", html.slice(0, 500));
+        throw new Error("sesskey not found");
+    }
+
+    STATE.sessKey = sessKey;
+    STATE.lastLoginTime = Date.now();
+
+    console.log("✅ Login success");
 }
 
 // ====================== DATE ======================
@@ -77,16 +93,18 @@ function getTodayDate() {
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
-// ====================== MAIN ROUTE ======================
+// ====================== ROUTE ======================
 router.get('/', async (req, res) => {
     const { type } = req.query;
 
     if (!type || !['numbers', 'sms'].includes(type)) {
-        return res.status(400).json({ error: "Use ?type=numbers or ?type=sms" });
+        return res.status(400).json({
+            error: "Use ?type=numbers or ?type=sms"
+        });
     }
 
     try {
-        // 🔄 Auto login if needed (every 10 min)
+        // Auto login (10 min refresh)
         if (!STATE.cookie || Date.now() - STATE.lastLoginTime > 10 * 60 * 1000) {
             await loginAndGetSession();
         }
@@ -117,9 +135,10 @@ router.get('/', async (req, res) => {
             }
         });
 
-        // 🚨 If blocked → retry login once
+        // अगर block ho gaya → retry login
         if (typeof response.data === "string" && response.data.includes("Direct Script Access")) {
-            console.log("⚠️ Session expired, retrying login...");
+            console.log("⚠️ Session expired → relogin");
+
             await loginAndGetSession();
 
             const retry = await axios.get(url, {
@@ -136,6 +155,8 @@ router.get('/', async (req, res) => {
         res.send(response.data);
 
     } catch (err) {
+        console.error("❌ Error:", err.message);
+
         res.status(500).json({
             error: "Failed",
             message: err.message
