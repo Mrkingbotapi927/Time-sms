@@ -1,163 +1,93 @@
 const express = require('express');
-const axios = require('axios');
+const puppeteer = require('puppeteer');
+
 const router = express.Router();
 
-// ====================== CONFIG ======================
+const BASE_URL = "https://www.timesms.org";
+
 const CREDENTIALS = {
     username: "Alisindhi077",
     password: "Alisindhi-077"
 };
 
-const BASE_URL = "https://www.timesms.org";
+let browser;
+let page;
 
-const COMMON_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Mobile Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9"
-};
-
-// ====================== STATE ======================
-const STATE = {
-    cookie: "",
-    sessKey: "",
-    lastLoginTime: 0
-};
-
-// ====================== LOGIN ======================
-async function loginAndGetSession() {
-    console.log("🔐 Login start...");
-
-    // STEP 1: Login
-    const loginRes = await axios.post(
-        `${BASE_URL}/login`,
-        new URLSearchParams({
-            username: CREDENTIALS.username,
-            password: CREDENTIALS.password
-        }),
-        {
-            headers: {
-                ...COMMON_HEADERS,
-                "Content-Type": "application/x-www-form-urlencoded"
-            },
-            maxRedirects: 0,
-            validateStatus: s => s < 500
-        }
-    );
-
-    // Extract cookie
-    const cookies = loginRes.headers['set-cookie'];
-    if (!cookies) throw new Error("Login failed (no cookie)");
-
-    STATE.cookie = cookies.map(c => c.split(';')[0]).join('; ');
-
-    // STEP 2: Open dashboard
-    const dash = await axios.get(`${BASE_URL}/agent/MySMSNumbers`, {
-        headers: {
-            ...COMMON_HEADERS,
-            "Cookie": STATE.cookie
-        }
+// ================= INIT =================
+async function initBrowser() {
+    browser = await puppeteer.launch({
+        headless: "new",
+        args: ["--no-sandbox", "--disable-setuid-sandbox"]
     });
 
-    const html = dash.data;
+    page = await browser.newPage();
 
-    // STEP 3: Extract sesskey (multi method)
-    let sessKey = null;
+    await page.setUserAgent(
+        "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/146.0 Mobile Safari/537.36"
+    );
 
-    let match = html.match(/sesskey=([A-Za-z0-9=]+)/);
-    if (match) sessKey = match[1];
+    console.log("🚀 Browser started");
+}
 
-    if (!sessKey) {
-        match = html.match(/name="sesskey"\s+value="([^"]+)"/);
-        if (match) sessKey = match[1];
-    }
+// ================= LOGIN =================
+async function login() {
+    console.log("🔐 Logging in...");
 
-    if (!sessKey) {
-        match = html.match(/sesskey["']?\s*[:=]\s*["']([^"']+)["']/);
-        if (match) sessKey = match[1];
-    }
+    await page.goto(`${BASE_URL}/login`, { waitUntil: "networkidle2" });
 
-    if (!sessKey) {
-        console.log("❌ HTML preview:", html.slice(0, 500));
-        throw new Error("sesskey not found");
-    }
+    await page.type('input[name="username"]', CREDENTIALS.username);
+    await page.type('input[name="password"]', CREDENTIALS.password);
 
-    STATE.sessKey = sessKey;
-    STATE.lastLoginTime = Date.now();
+    await Promise.all([
+        page.click('button[type="submit"]'),
+        page.waitForNavigation({ waitUntil: "networkidle2" })
+    ]);
 
     console.log("✅ Login success");
 }
 
-// ====================== DATE ======================
-function getTodayDate() {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-}
-
-// ====================== ROUTE ======================
+// ================= ROUTE =================
 router.get('/', async (req, res) => {
     const { type } = req.query;
 
     if (!type || !['numbers', 'sms'].includes(type)) {
-        return res.status(400).json({
-            error: "Use ?type=numbers or ?type=sms"
-        });
+        return res.json({ error: "use ?type=numbers or ?type=sms" });
     }
 
     try {
-        // Auto login (10 min refresh)
-        if (!STATE.cookie || Date.now() - STATE.lastLoginTime > 10 * 60 * 1000) {
-            await loginAndGetSession();
+        if (!browser) {
+            await initBrowser();
+            await login();
         }
-
-        const ts = Date.now();
-        const today = getTodayDate();
 
         let url = "";
-        let referer = "";
 
         if (type === "numbers") {
-            referer = `${BASE_URL}/agent/MySMSNumbers`;
-
-            url = `${BASE_URL}/agent/res/data_smsnumbers.php?frange=&fclient=&sEcho=2&iDisplayStart=0&iDisplayLength=-1&_=${ts}`;
+            url = `${BASE_URL}/agent/MySMSNumbers`;
         } else {
-            referer = `${BASE_URL}/agent/SMSCDRReports`;
-
-            url = `${BASE_URL}/agent/res/data_smscdr.php?fdate1=${today}%2000:00:00&fdate2=${today}%2023:59:59&sesskey=${STATE.sessKey}&sEcho=2&iDisplayStart=0&iDisplayLength=-1&_=${ts}`;
+            url = `${BASE_URL}/agent/SMSCDRReports`;
         }
 
-        console.log("🌐 URL:", url);
+        await page.goto(url, { waitUntil: "networkidle2" });
 
-        const response = await axios.get(url, {
-            headers: {
-                ...COMMON_HEADERS,
-                "Referer": referer,
-                "Cookie": STATE.cookie
-            }
+        // Wait for table/data load
+        await page.waitForTimeout(3000);
+
+        // Extract page content OR API response
+        const data = await page.evaluate(() => {
+            return document.body.innerText;
         });
 
-        // अगर block ho gaya → retry login
-        if (typeof response.data === "string" && response.data.includes("Direct Script Access")) {
-            console.log("⚠️ Session expired → relogin");
-
-            await loginAndGetSession();
-
-            const retry = await axios.get(url, {
-                headers: {
-                    ...COMMON_HEADERS,
-                    "Referer": referer,
-                    "Cookie": STATE.cookie
-                }
-            });
-
-            return res.send(retry.data);
-        }
-
-        res.send(response.data);
+        res.send({
+            success: true,
+            type,
+            data
+        });
 
     } catch (err) {
-        console.error("❌ Error:", err.message);
+        console.log("❌ Error:", err.message);
 
-        res.status(500).json({
+        res.json({
             error: "Failed",
             message: err.message
         });
