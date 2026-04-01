@@ -16,21 +16,20 @@ const COMMON_HEADERS = {
     "sec-ch-ua-mobile": "?1",
     "sec-ch-ua-platform": '"Android"',
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    "Accept-Language": "en-PK,en-US;q=0.9,en;q=0.8",
-    "X-Requested-With": "mark.via.gp"
+    "Accept-Language": "en-PK,en-US;q=0.9,en;q=0.8"
 };
 
 // ====================== STATE ======================
 const STATE = {
-    cookie: "PHPSESSID=86b02e0130890dbbe7c794a3a5c4e080",  // default from your capture
-    sessKey: "Q05RR0FST0JCUQ==",   // working sesskey
+    cookie: "PHPSESSID=86b02e0130890dbbe7c794a3a5c4e080",
+    sessKey: "Q05RR0FST0JCUQ==",
     lastLoginTime: Date.now()
 };
 
 // ====================== HELPERS ======================
 function getTodayDate() {
     const d = new Date();
-    return `\( {d.getFullYear()}- \){String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
 // ====================== MAIN ROUTE ======================
@@ -49,16 +48,23 @@ router.get('/', async (req, res) => {
 
     const ts = Date.now();
     const today = getTodayDate();
+
     let targetUrl = "";
     let referer = "";
 
     if (type === 'numbers') {
         referer = `${BASE_URL}/agent/MySMSNumbers`;
-        targetUrl = `\( {BASE_URL}/agent/res/data_smsnumbers.php?frange=&fclient=&sEcho=2&iDisplayStart=0&iDisplayLength=-1&_= \){ts}`;
-    } else { // sms
+
+        targetUrl = `${BASE_URL}/agent/res/data_smsnumbers.php?frange=&fclient=&sEcho=2&iDisplayStart=0&iDisplayLength=-1&_=${ts}`;
+    } 
+    else if (type === 'sms') {
         referer = `${BASE_URL}/agent/SMSCDRReports`;
-        targetUrl = `\( {BASE_URL}/agent/res/data_smscdr.php?fdate1= \){today}%2000:00:00&fdate2=\( {today}%2023:59:59&frange=&fclient=&fnum=&fcli=&fgdate=&fgmonth=&fgrange=&fgclient=&fgnumber=&fgcli=&fg=0&sesskey= \){STATE.sessKey}&sEcho=2&iColumns=9&sColumns=%2C%2C%2C%2C%2C%2C%2C%2C&iDisplayStart=0&iDisplayLength=-1&_=${ts}`;
+
+        targetUrl = `${BASE_URL}/agent/res/data_smscdr.php?fdate1=${today}%2000:00:00&fdate2=${today}%2023:59:59&frange=&fclient=&fnum=&fcli=&fgdate=&fgmonth=&fgrange=&fgclient=&fgnumber=&fgcli=&fg=0&sesskey=${STATE.sessKey}&sEcho=2&iColumns=9&sColumns=%2C%2C%2C%2C%2C%2C%2C%2C&iDisplayStart=0&iDisplayLength=-1&_=${ts}`;
     }
+
+    // DEBUG
+    console.log("🌐 Generated URL:", targetUrl);
 
     // Safety check
     if (!targetUrl || !targetUrl.startsWith('https://')) {
@@ -67,8 +73,6 @@ router.get('/', async (req, res) => {
     }
 
     try {
-        console.log(`→ Calling: ${targetUrl.substring(0, 120)}...`);
-
         const response = await axios.get(targetUrl, {
             headers: {
                 ...COMMON_HEADERS,
@@ -79,24 +83,35 @@ router.get('/', async (req, res) => {
             timeout: 30000
         });
 
-        console.log(`✅ Response received | Status: ${response.status} | Data type: ${typeof response.data}`);
+        console.log(`✅ Response received | Status: ${response.status}`);
 
+        // Block detection
         if (typeof response.data === 'string' && response.data.includes("Direct Script Access Not Allowed")) {
             return res.status(403).json({ 
                 error: "Access Blocked by Site",
-                message: "Direct script access not allowed. Session may be invalid."
+                message: "Session expired or invalid cookie"
             });
         }
 
-        res.set('Content-Type', 'application/json');
-        res.send(response.data);
+        // Safe JSON handling
+        if (typeof response.data === 'string') {
+            try {
+                return res.json(JSON.parse(response.data));
+            } catch {
+                return res.send(response.data);
+            }
+        }
+
+        res.json(response.data);
 
     } catch (error) {
-        console.error(`❌ Axios Error for ${type}:`, error.message);
+        console.error(`❌ Axios Error:`, error.message);
+
         if (error.response) {
             console.error("Status:", error.response.status);
-            console.error("Response preview:", error.response.data?.toString().substring(0, 200));
+            console.error("Preview:", String(error.response.data).substring(0, 200));
         }
+
         res.status(500).json({ 
             error: "Failed to fetch data",
             details: error.message 
