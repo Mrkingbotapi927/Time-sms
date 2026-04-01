@@ -11,14 +11,13 @@ const COMMON_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9"
 };
 
-// ====================== STATE ======================
+// ====================== GLOBAL STATE ======================
 const STATE = {
-    cookie: "PHPSESSID=2fa908dab18ad8faa413a849761abf1c",
-    sessKey: "Q05RR0FST0JCUQ==",
+    cookie: null,
+    sessKey: null,
     isLoggingIn: false,
-    lastLoginTime: Date.now()
+    lastLoginTime: 0
 };
-
 // ====================== DATE ======================
 function getTodayDate() {
     const d = new Date();
