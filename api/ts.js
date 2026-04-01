@@ -1,93 +1,81 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
-
+const axios = require('axios');
 const router = express.Router();
 
+// ====================== CONFIG ======================
 const BASE_URL = "https://www.timesms.org";
 
-const CREDENTIALS = {
-    username: "Alisindhi077",
-    password: "Alisindhi-077"
+const COMMON_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Mobile Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9"
 };
 
-let browser;
-let page;
+// ====================== STATE ======================
+const STATE = {
+    cookie: "PHPSESSID=2fa908dab18ad8faa413a849761abf1c",
+    sessKey: "Q05RR0FST0JCUQ==",
+    isLoggingIn: false,
+    lastLoginTime: Date.now()
+};
 
-// ================= INIT =================
-async function initBrowser() {
-    browser = await puppeteer.launch({
-        headless: "new",
-        args: ["--no-sandbox", "--disable-setuid-sandbox"]
-    });
-
-    page = await browser.newPage();
-
-    await page.setUserAgent(
-        "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/146.0 Mobile Safari/537.36"
-    );
-
-    console.log("🚀 Browser started");
+// ====================== DATE ======================
+function getTodayDate() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
-// ================= LOGIN =================
-async function login() {
-    console.log("🔐 Logging in...");
-
-    await page.goto(`${BASE_URL}/login`, { waitUntil: "networkidle2" });
-
-    await page.type('input[name="username"]', CREDENTIALS.username);
-    await page.type('input[name="password"]', CREDENTIALS.password);
-
-    await Promise.all([
-        page.click('button[type="submit"]'),
-        page.waitForNavigation({ waitUntil: "networkidle2" })
-    ]);
-
-    console.log("✅ Login success");
-}
-
-// ================= ROUTE =================
+// ====================== ROUTE ======================
 router.get('/', async (req, res) => {
     const { type } = req.query;
 
     if (!type || !['numbers', 'sms'].includes(type)) {
-        return res.json({ error: "use ?type=numbers or ?type=sms" });
+        return res.status(400).json({
+            error: "Use ?type=numbers or ?type=sms"
+        });
     }
 
     try {
-        if (!browser) {
-            await initBrowser();
-            await login();
-        }
+        const ts = Date.now();
+        const today = getTodayDate();
 
         let url = "";
+        let referer = "";
 
         if (type === "numbers") {
-            url = `${BASE_URL}/agent/MySMSNumbers`;
+            referer = `${BASE_URL}/agent/MySMSNumbers`;
+
+            url = `${BASE_URL}/agent/res/data_smsnumbers.php?frange=&fclient=&sEcho=2&iDisplayStart=0&iDisplayLength=-1&_=${ts}`;
         } else {
-            url = `${BASE_URL}/agent/SMSCDRReports`;
+            referer = `${BASE_URL}/agent/SMSCDRReports`;
+
+            url = `${BASE_URL}/agent/res/data_smscdr.php?fdate1=${today}%2000:00:00&fdate2=${today}%2023:59:59&sesskey=${STATE.sessKey}&sEcho=2&iDisplayStart=0&iDisplayLength=-1&_=${ts}`;
         }
 
-        await page.goto(url, { waitUntil: "networkidle2" });
+        console.log("🌐 URL:", url);
 
-        // Wait for table/data load
-        await page.waitForTimeout(3000);
-
-        // Extract page content OR API response
-        const data = await page.evaluate(() => {
-            return document.body.innerText;
+        const response = await axios.get(url, {
+            headers: {
+                ...COMMON_HEADERS,
+                "Referer": referer,
+                "Cookie": STATE.cookie
+            }
         });
 
-        res.send({
-            success: true,
-            type,
-            data
-        });
+        // block check
+        if (typeof response.data === "string" && response.data.includes("Direct Script Access")) {
+            return res.status(403).json({
+                error: "Session expired",
+                message: "Update cookie + sesskey again"
+            });
+        }
+
+        res.send(response.data);
 
     } catch (err) {
-        console.log("❌ Error:", err.message);
+        console.error("❌ Error:", err.message);
 
-        res.json({
+        res.status(500).json({
             error: "Failed",
             message: err.message
         });
