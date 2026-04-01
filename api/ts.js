@@ -17,17 +17,14 @@ const COMMON_HEADERS = {
     "sec-ch-ua-platform": '"Android"',
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
     "Accept-Language": "en-PK,en-US;q=0.9,en;q=0.8",
-    "Upgrade-Insecure-Requests": "1",
-    "X-Requested-With": "mark.via.gp",
-    "Accept-Encoding": "gzip, deflate, br, zstd"
+    "X-Requested-With": "mark.via.gp"
 };
 
 // ====================== STATE ======================
 const STATE = {
     cookie: null,
-    sessKey: "Q05RR0FST0JCUQ==",   // Tumhara working sesskey (fallback)
-    isLoggingIn: false,
-    lastLoginTime: Date.now()
+    sessKey: "Q05RR0FST0JCUQ==",   // Working sesskey (manual)
+    isLoggingIn: false
 };
 
 // ====================== HELPERS ======================
@@ -36,70 +33,20 @@ function getTodayDate() {
     return `\( {d.getFullYear()}- \){String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
-// ====================== LOGIN ======================
-async function performLogin() {
-    if (STATE.isLoggingIn) return;
-    STATE.isLoggingIn = true;
-
-    console.log("🔄 Login attempt in progress...");
-
-    try {
-        const instance = axios.create({ timeout: 20000, withCredentials: true });
-
-        // GET Login
-        const r1 = await instance.get(`${BASE_URL}/login`, {
-            headers: { ...COMMON_HEADERS, "Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document" }
-        });
-
-        let tempCookie = r1.headers['set-cookie']?.find(c => c.includes('PHPSESSID'))?.split(';')[0] || "";
-
-        // Captcha
-        const captchaMatch = r1.data.match(/What is (\d+)\s*\+\s*(\d+)\s*=\s*\?/i);
-        const capt = captchaMatch ? parseInt(captchaMatch[1]) + parseInt(captchaMatch[2]) : 0;
-
-        // POST Signin
-        const r2 = await instance.post(`${BASE_URL}/signin`, 
-            `username=\( {CREDENTIALS.username}&password= \){CREDENTIALS.password}&capt=${capt}`,
-            {
-                headers: {
-                    ...COMMON_HEADERS,
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Origin": BASE_URL,
-                    "Referer": `${BASE_URL}/login`,
-                    "Sec-Fetch-Site": "same-origin",
-                    "Sec-Fetch-Mode": "navigate",
-                    "Sec-Fetch-Dest": "document",
-                    "Cookie": tempCookie
-                }
-            }
-        );
-
-        // Update cookie
-        if (r2.headers['set-cookie']) {
-            const newCookie = r2.headers['set-cookie'].find(c => c.includes('PHPSESSID'));
-            if (newCookie) STATE.cookie = newCookie.split(';')[0];
-        } else if (tempCookie) {
-            STATE.cookie = tempCookie;
-        }
-
-        console.log("✅ Cookie updated");
-
-    } catch (e) {
-        console.error("Login error:", e.message);
-    } finally {
-        STATE.isLoggingIn = false;
-    }
-}
-
-setInterval(performLogin, 180000);
-
 // ====================== MAIN ROUTE ======================
 router.get('/', async (req, res) => {
     const { type } = req.query;
 
-    if (!['numbers', 'sms'].includes(type)) {
-        return res.status(400).json({ error: "Use ?type=numbers or ?type=sms" });
+    // URL validation
+    if (!type || !['numbers', 'sms'].includes(type)) {
+        return res.status(400).json({ 
+            error: "Invalid type",
+            message: "Use ?type=numbers or ?type=sms",
+            example: "/api/ts?type=sms"
+        });
     }
+
+    console.log(`📥 Request received → type: ${type}`);
 
     const ts = Date.now();
     const today = getTodayDate();
@@ -115,7 +62,7 @@ router.get('/', async (req, res) => {
     }
 
     try {
-        console.log(`Fetching ${type} data...`);
+        console.log(`→ Fetching from: ${targetUrl.substring(0, 100)}...`);
 
         const response = await axios.get(targetUrl, {
             headers: {
@@ -124,26 +71,36 @@ router.get('/', async (req, res) => {
                 "Sec-Fetch-Site": "same-origin",
                 "Cookie": STATE.cookie || "PHPSESSID=86b02e0130890dbbe7c794a3a5c4e080"
             },
-            timeout: 25000
+            timeout: 30000
         });
 
-        if (typeof response.data === 'string' && 
-            (response.data.includes("Direct Script Access Not Allowed") || response.data.includes("<html"))) {
-            return res.status(403).json({ 
-                error: "Access blocked",
-                message: "Try updating sesskey manually or check login"
-            });
+        // Check for common errors
+        if (typeof response.data === 'string') {
+            if (response.data.includes("Direct Script Access Not Allowed")) {
+                return res.status(403).json({ 
+                    error: "Access Blocked",
+                    message: "Site ne direct access block kar diya hai"
+                });
+            }
+            if (response.data.includes("<html")) {
+                return res.status(503).json({ 
+                    error: "Session expired",
+                    message: "Login refresh karna pad sakta hai"
+                });
+            }
         }
 
+        console.log(`✅ ${type} data fetched successfully`);
         res.set('Content-Type', 'application/json');
         res.send(response.data);
 
     } catch (error) {
-        console.error(`Error in ${type}:`, error.message);
-        res.status(500).json({ error: error.message });
+        console.error(`❌ Error fetching ${type}:`, error.message);
+        res.status(500).json({ 
+            error: "Failed to fetch data",
+            details: error.message 
+        });
     }
 });
-
-performLogin(); // initial login
 
 module.exports = router;
