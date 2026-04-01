@@ -9,22 +9,25 @@ const CREDENTIALS = {
 };
 
 const BASE_URL = "https://www.timesms.org";
-const DASHBOARD_URL = `${BASE_URL}/agent/SMSDashboard`;
 
 const COMMON_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Linux; Android 15; RMX3930 Build/AP3A.240905.015.A2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.120 Mobile Safari/537.36",
-    "X-Requested-With": "XMLHttpRequest",
-    "Origin": BASE_URL,
+    "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Android WebView";v="146"',
+    "sec-ch-ua-mobile": "?1",
+    "sec-ch-ua-platform": '"Android"',
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
     "Accept-Language": "en-PK,en-US;q=0.9,en;q=0.8",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    "Upgrade-Insecure-Requests": "1",
+    "X-Requested-With": "mark.via.gp",
+    "Accept-Encoding": "gzip, deflate, br, zstd"
 };
 
 // ====================== STATE ======================
 const STATE = {
     cookie: null,
-    sessKey: null,
+    sessKey: "Q05RR0FST0JCUQ==",   // Tumhara working sesskey (fallback)
     isLoggingIn: false,
-    lastLoginTime: 0
+    lastLoginTime: Date.now()
 };
 
 // ====================== HELPERS ======================
@@ -33,116 +36,62 @@ function getTodayDate() {
     return `\( {d.getFullYear()}- \){String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
-function extractSessKey(html) {
-    let match = html.match(/sesskey=([^&"'\s]+)/i);
-    if (match) return match[1];
-    match = html.match(/sesskey["']\s*[:=]\s*["']([^"']+)["']/i);
-    return match ? match[1] : null;
-}
-
-function isSessionValid() {
-    return STATE.cookie && STATE.sessKey;
-}
-
-// ====================== IMPROVED LOGIN ======================
-async function performLogin(force = false) {
-    if (STATE.isLoggingIn) {
-        console.log("⏳ Login already in progress...");
-        return;
-    }
-
-    const now = Date.now();
-    if (!force && isSessionValid() && (now - STATE.lastLoginTime < 90000)) return; // 1.5 min cooldown
-
+// ====================== LOGIN ======================
+async function performLogin() {
+    if (STATE.isLoggingIn) return;
     STATE.isLoggingIn = true;
-    console.log("🔄 Starting login to https://www.timesms.org ...");
+
+    console.log("🔄 Login attempt in progress...");
 
     try {
-        const instance = axios.create({
-            timeout: 18000,           // increased timeout
-            withCredentials: true
+        const instance = axios.create({ timeout: 20000, withCredentials: true });
+
+        // GET Login
+        const r1 = await instance.get(`${BASE_URL}/login`, {
+            headers: { ...COMMON_HEADERS, "Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document" }
         });
 
-        // 1. Get Login Page
-        console.log("→ Getting login page...");
-        const r1 = await instance.get(`${BASE_URL}/login`, { headers: COMMON_HEADERS });
+        let tempCookie = r1.headers['set-cookie']?.find(c => c.includes('PHPSESSID'))?.split(';')[0] || "";
 
-        let tempCookie = "";
-        if (r1.headers['set-cookie']) {
-            const c = r1.headers['set-cookie'].find(x => x.includes('PHPSESSID'));
-            if (c) tempCookie = c.split(';')[0];
-        }
-
-        // 2. Solve Captcha
+        // Captcha
         const captchaMatch = r1.data.match(/What is (\d+)\s*\+\s*(\d+)\s*=\s*\?/i);
         const capt = captchaMatch ? parseInt(captchaMatch[1]) + parseInt(captchaMatch[2]) : 0;
 
-        console.log(`→ Captcha solved: ${capt}`);
-
-        if (capt === 0) {
-            throw new Error("Captcha pattern not found on login page");
-        }
-
-        // 3. POST Login
-        console.log("→ Sending login credentials...");
+        // POST Signin
         const r2 = await instance.post(`${BASE_URL}/signin`, 
-            `username=\( {CREDENTIALS.username}&password= \){CREDENTIALS.password}&capt=${capt}`, 
+            `username=\( {CREDENTIALS.username}&password= \){CREDENTIALS.password}&capt=${capt}`,
             {
                 headers: {
                     ...COMMON_HEADERS,
                     "Content-Type": "application/x-www-form-urlencoded",
-                    "Cookie": tempCookie,
-                    "Referer": `${BASE_URL}/login`
+                    "Origin": BASE_URL,
+                    "Referer": `${BASE_URL}/login`,
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Dest": "document",
+                    "Cookie": tempCookie
                 }
             }
         );
 
         // Update cookie
         if (r2.headers['set-cookie']) {
-            const newC = r2.headers['set-cookie'].find(x => x.includes('PHPSESSID'));
-            if (newC) STATE.cookie = newC.split(';')[0];
+            const newCookie = r2.headers['set-cookie'].find(c => c.includes('PHPSESSID'));
+            if (newCookie) STATE.cookie = newCookie.split(';')[0];
         } else if (tempCookie) {
             STATE.cookie = tempCookie;
         }
 
-        console.log("→ Cookie received");
+        console.log("✅ Cookie updated");
 
-        // 4. Get Dashboard for sesskey
-        console.log("→ Getting dashboard for sesskey...");
-        const r3 = await axios.get(DASHBOARD_URL, {
-            headers: {
-                ...COMMON_HEADERS,
-                "Cookie": STATE.cookie,
-                "Referer": `${BASE_URL}/agent/`
-            },
-            timeout: 18000
-        });
-
-        const key = extractSessKey(r3.data);
-        if (!key) {
-            console.log("HTML snippet:", r3.data.substring(0, 500)); // debug
-            throw new Error("sesskey not found in dashboard");
-        }
-
-        STATE.sessKey = key;
-        STATE.lastLoginTime = now;
-        console.log(`✅ Login SUCCESS | SessKey: ${key}`);
-
-    } catch (error) {
-        console.error("❌ Login ERROR:", error.message);
-        if (error.response) {
-            console.error("Status:", error.response.status);
-            console.error("Response preview:", error.response.data?.substring?.(0, 300) || "No data");
-        }
-        STATE.cookie = null;
-        STATE.sessKey = null;
+    } catch (e) {
+        console.error("Login error:", e.message);
     } finally {
         STATE.isLoggingIn = false;
     }
 }
 
-// Auto refresh (thoda slow kiya)
-setInterval(() => performLogin(), 180000); // 3 minutes
+setInterval(performLogin, 180000);
 
 // ====================== MAIN ROUTE ======================
 router.get('/', async (req, res) => {
@@ -152,57 +101,49 @@ router.get('/', async (req, res) => {
         return res.status(400).json({ error: "Use ?type=numbers or ?type=sms" });
     }
 
-    console.log(`📥 Request received for type: ${type}`);
-
-    if (!isSessionValid()) {
-        console.log("No valid session, logging in...");
-        await performLogin(true);
-        if (!isSessionValid()) {
-            return res.status(503).json({ error: "Login failed. Check server logs." });
-        }
-    }
-
     const ts = Date.now();
     const today = getTodayDate();
-    let targetUrl = "", referer = "";
+    let targetUrl = "";
+    let referer = "";
 
     if (type === 'numbers') {
         referer = `${BASE_URL}/agent/MySMSNumbers`;
         targetUrl = `\( {BASE_URL}/agent/res/data_smsnumbers.php?frange=&fclient=&sEcho=2&iDisplayStart=0&iDisplayLength=-1&_= \){ts}`;
     } else {
         referer = `${BASE_URL}/agent/SMSCDRReports`;
-        targetUrl = `\( {BASE_URL}/agent/res/data_smscdr.php?fdate1= \){today}%2000:00:00&fdate2=\( {today}%2023:59:59&sesskey= \){STATE.sessKey}&sEcho=2&iDisplayStart=0&iDisplayLength=-1&_=${ts}`;
+        targetUrl = `\( {BASE_URL}/agent/res/data_smscdr.php?fdate1= \){today}%2000:00:00&fdate2=\( {today}%2023:59:59&frange=&fclient=&fnum=&fcli=&fgdate=&fgmonth=&fgrange=&fgclient=&fgnumber=&fgcli=&fg=0&sesskey= \){STATE.sessKey}&sEcho=2&iColumns=9&sColumns=%2C%2C%2C%2C%2C%2C%2C%2C&iDisplayStart=0&iDisplayLength=-1&_=${ts}`;
     }
 
     try {
-        console.log(`→ Fetching ${type} data...`);
+        console.log(`Fetching ${type} data...`);
+
         const response = await axios.get(targetUrl, {
             headers: {
                 ...COMMON_HEADERS,
-                "Cookie": STATE.cookie,
-                "Referer": referer
+                "Referer": referer,
+                "Sec-Fetch-Site": "same-origin",
+                "Cookie": STATE.cookie || "PHPSESSID=86b02e0130890dbbe7c794a3a5c4e080"
             },
             timeout: 25000
         });
 
-        if (typeof response.data === 'string' && response.data.includes('<html')) {
-            console.log("⚠️ Session expired detected");
-            STATE.cookie = null;
-            STATE.sessKey = null;
-            return res.status(503).json({ message: "Session expired. Try again in few seconds." });
+        if (typeof response.data === 'string' && 
+            (response.data.includes("Direct Script Access Not Allowed") || response.data.includes("<html"))) {
+            return res.status(403).json({ 
+                error: "Access blocked",
+                message: "Try updating sesskey manually or check login"
+            });
         }
 
-        console.log(`✅ ${type} data fetched successfully`);
         res.set('Content-Type', 'application/json');
         res.send(response.data);
 
-    } catch (e) {
-        console.error(`❌ Fetch error for ${type}:`, e.message);
-        res.status(500).json({ error: e.message });
+    } catch (error) {
+        console.error(`Error in ${type}:`, error.message);
+        res.status(500).json({ error: error.message });
     }
 });
 
-// Server start pe login
-performLogin();
+performLogin(); // initial login
 
 module.exports = router;
