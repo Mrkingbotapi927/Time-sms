@@ -2,7 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const router = express.Router();
 
-// ====================== CONFIGURATION ======================
+// ====================== CONFIG ======================
 const CREDENTIALS = {
     username: "Alisindhi077",
     password: "Alisindhi-077"
@@ -15,10 +15,11 @@ const COMMON_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Linux; Android 15; RMX3930 Build/AP3A.240905.015.A2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.120 Mobile Safari/537.36",
     "X-Requested-With": "XMLHttpRequest",
     "Origin": BASE_URL,
-    "Accept-Language": "en-PK,en-US;q=0.9,en;q=0.8"
+    "Accept-Language": "en-PK,en-US;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 };
 
-// ====================== GLOBAL STATE ======================
+// ====================== STATE ======================
 const STATE = {
     cookie: null,
     sessKey: null,
@@ -26,14 +27,16 @@ const STATE = {
     lastLoginTime: 0
 };
 
-// ====================== HELPER FUNCTIONS ======================
+// ====================== HELPERS ======================
 function getTodayDate() {
     const d = new Date();
-    return `\( {d.getFullYear()}- \){String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return `\( {d.getFullYear()}- \){String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
 function extractSessKey(html) {
-    const match = html.match(/sesskey=([^&"'\s]+)/i);
+    let match = html.match(/sesskey=([^&"'\s]+)/i);
+    if (match) return match[1];
+    match = html.match(/sesskey["']\s*[:=]\s*["']([^"']+)["']/i);
     return match ? match[1] : null;
 }
 
@@ -41,82 +44,96 @@ function isSessionValid() {
     return STATE.cookie && STATE.sessKey;
 }
 
-// ====================== LOGIN SERVICE ======================
+// ====================== IMPROVED LOGIN ======================
 async function performLogin(force = false) {
+    if (STATE.isLoggingIn) {
+        console.log("⏳ Login already in progress...");
+        return;
+    }
+
     const now = Date.now();
-    if (STATE.isLoggingIn) return;
-    if (!force && isSessionValid() && (now - STATE.lastLoginTime < 60000)) return;
+    if (!force && isSessionValid() && (now - STATE.lastLoginTime < 90000)) return; // 1.5 min cooldown
 
     STATE.isLoggingIn = true;
-    console.log("🔄 Logging into timesms.org Agent Panel...");
+    console.log("🔄 Starting login to https://www.timesms.org ...");
 
     try {
         const instance = axios.create({
-            headers: COMMON_HEADERS,
-            timeout: 15000,
+            timeout: 18000,           // increased timeout
             withCredentials: true
         });
 
-        // Step 1: Get login page
-        const r1 = await instance.get(`${BASE_URL}/login`);
+        // 1. Get Login Page
+        console.log("→ Getting login page...");
+        const r1 = await instance.get(`${BASE_URL}/login`, { headers: COMMON_HEADERS });
 
         let tempCookie = "";
         if (r1.headers['set-cookie']) {
-            const phpCookie = r1.headers['set-cookie'].find(c => c.includes('PHPSESSID'));
-            if (phpCookie) tempCookie = phpCookie.split(';')[0];
+            const c = r1.headers['set-cookie'].find(x => x.includes('PHPSESSID'));
+            if (c) tempCookie = c.split(';')[0];
         }
 
-        // Step 2: Solve math captcha
-        const match = r1.data.match(/What is (\d+) \+ (\d+) = \?/i);
-        const captchaAnswer = match ? parseInt(match[1]) + parseInt(match[2]) : 0;
+        // 2. Solve Captcha
+        const captchaMatch = r1.data.match(/What is (\d+)\s*\+\s*(\d+)\s*=\s*\?/i);
+        const capt = captchaMatch ? parseInt(captchaMatch[1]) + parseInt(captchaMatch[2]) : 0;
 
-        if (captchaAnswer === 0) throw new Error("Captcha pattern not found");
+        console.log(`→ Captcha solved: ${capt}`);
 
-        // Step 3: Login POST
-        const r2 = await instance.post(`${BASE_URL}/signin`,
-            new URLSearchParams({
-                username: CREDENTIALS.username,
-                password: CREDENTIALS.password,
-                capt: captchaAnswer
-            }), {
+        if (capt === 0) {
+            throw new Error("Captcha pattern not found on login page");
+        }
+
+        // 3. POST Login
+        console.log("→ Sending login credentials...");
+        const r2 = await instance.post(`${BASE_URL}/signin`, 
+            `username=\( {CREDENTIALS.username}&password= \){CREDENTIALS.password}&capt=${capt}`, 
+            {
                 headers: {
+                    ...COMMON_HEADERS,
                     "Content-Type": "application/x-www-form-urlencoded",
                     "Cookie": tempCookie,
                     "Referer": `${BASE_URL}/login`
-                },
-                maxRedirects: 0,
-                validateStatus: () => true
+                }
             }
         );
 
         // Update cookie
         if (r2.headers['set-cookie']) {
-            const newCookie = r2.headers['set-cookie'].find(c => c.includes('PHPSESSID'));
-            if (newCookie) STATE.cookie = newCookie.split(';')[0];
+            const newC = r2.headers['set-cookie'].find(x => x.includes('PHPSESSID'));
+            if (newC) STATE.cookie = newC.split(';')[0];
         } else if (tempCookie) {
             STATE.cookie = tempCookie;
         }
 
-        // Step 4: Get Dashboard to extract sesskey
+        console.log("→ Cookie received");
+
+        // 4. Get Dashboard for sesskey
+        console.log("→ Getting dashboard for sesskey...");
         const r3 = await axios.get(DASHBOARD_URL, {
             headers: {
                 ...COMMON_HEADERS,
                 "Cookie": STATE.cookie,
                 "Referer": `${BASE_URL}/agent/`
-            }
+            },
+            timeout: 18000
         });
 
         const key = extractSessKey(r3.data);
-        if (key) {
-            STATE.sessKey = key;
-            STATE.lastLoginTime = now;
-            console.log(`✅ Login Success | SessKey: ${key}`);
-        } else {
-            throw new Error("Failed to extract sesskey from dashboard");
+        if (!key) {
+            console.log("HTML snippet:", r3.data.substring(0, 500)); // debug
+            throw new Error("sesskey not found in dashboard");
         }
 
+        STATE.sessKey = key;
+        STATE.lastLoginTime = now;
+        console.log(`✅ Login SUCCESS | SessKey: ${key}`);
+
     } catch (error) {
-        console.error("❌ Login failed:", error.message);
+        console.error("❌ Login ERROR:", error.message);
+        if (error.response) {
+            console.error("Status:", error.response.status);
+            console.error("Response preview:", error.response.data?.substring?.(0, 300) || "No data");
+        }
         STATE.cookie = null;
         STATE.sessKey = null;
     } finally {
@@ -124,82 +141,68 @@ async function performLogin(force = false) {
     }
 }
 
-// Auto refresh every 2 minutes
-setInterval(() => performLogin(), 120000);
+// Auto refresh (thoda slow kiya)
+setInterval(() => performLogin(), 180000); // 3 minutes
 
 // ====================== MAIN ROUTE ======================
 router.get('/', async (req, res) => {
     const { type } = req.query;
 
-    if (!type || !['numbers', 'sms'].includes(type)) {
-        return res.status(400).json({
-            error: "Invalid type. Use ?type=numbers or ?type=sms"
-        });
+    if (!['numbers', 'sms'].includes(type)) {
+        return res.status(400).json({ error: "Use ?type=numbers or ?type=sms" });
     }
 
+    console.log(`📥 Request received for type: ${type}`);
+
     if (!isSessionValid()) {
+        console.log("No valid session, logging in...");
         await performLogin(true);
         if (!isSessionValid()) {
-            return res.status(503).json({ error: "Login failed. Try again later." });
+            return res.status(503).json({ error: "Login failed. Check server logs." });
         }
     }
 
     const ts = Date.now();
     const today = getTodayDate();
-    let targetUrl = "";
-    let referer = "";
+    let targetUrl = "", referer = "";
 
     if (type === 'numbers') {
         referer = `${BASE_URL}/agent/MySMSNumbers`;
         targetUrl = `\( {BASE_URL}/agent/res/data_smsnumbers.php?frange=&fclient=&sEcho=2&iDisplayStart=0&iDisplayLength=-1&_= \){ts}`;
-    } 
-    else if (type === 'sms') {
+    } else {
         referer = `${BASE_URL}/agent/SMSCDRReports`;
-        targetUrl = `\( {BASE_URL}/agent/res/data_smscdr.php?fdate1= \){today}%2000:00:00&fdate2=\( {today}%2023:59:59&frange=&fclient=&fnum=&fcli=&fgdate=&fgmonth=&fgrange=&fgclient=&fgnumber=&fgcli=&fg=0&sesskey= \){STATE.sessKey}&sEcho=2&iDisplayStart=0&iDisplayLength=-1&_=${ts}`;
+        targetUrl = `\( {BASE_URL}/agent/res/data_smscdr.php?fdate1= \){today}%2000:00:00&fdate2=\( {today}%2023:59:59&sesskey= \){STATE.sessKey}&sEcho=2&iDisplayStart=0&iDisplayLength=-1&_=${ts}`;
     }
 
     try {
+        console.log(`→ Fetching ${type} data...`);
         const response = await axios.get(targetUrl, {
             headers: {
                 ...COMMON_HEADERS,
                 "Cookie": STATE.cookie,
                 "Referer": referer
             },
-            timeout: 20000
+            timeout: 25000
         });
 
-        // Check if session expired (HTML response)
-        if (typeof response.data === 'string' && 
-            (response.data.includes('<html') || response.data.toLowerCase().includes('login'))) {
-            
-            console.log("⚠️ Session expired, refreshing...");
+        if (typeof response.data === 'string' && response.data.includes('<html')) {
+            console.log("⚠️ Session expired detected");
             STATE.cookie = null;
             STATE.sessKey = null;
-            await performLogin(true);
-            return res.status(503).json({ message: "Session refreshed. Please try again." });
+            return res.status(503).json({ message: "Session expired. Try again in few seconds." });
         }
 
+        console.log(`✅ ${type} data fetched successfully`);
         res.set('Content-Type', 'application/json');
         res.send(response.data);
 
-    } catch (error) {
-        console.error(`❌ Error fetching ${type}:`, error.message);
-
-        if (error.response && [403, 401].includes(error.response.status)) {
-            STATE.cookie = null;
-            STATE.sessKey = null;
-            await performLogin(true);
-            return res.status(503).json({ message: "Session expired. Retrying..." });
-        }
-
-        res.status(500).json({ 
-            error: "Failed to fetch data",
-            details: error.message 
-        });
+    } catch (e) {
+        console.error(`❌ Fetch error for ${type}:`, e.message);
+        res.status(500).json({ error: e.message });
     }
 });
 
-// Initial login
+// Server start pe login
 performLogin();
 
 module.exports = router;
